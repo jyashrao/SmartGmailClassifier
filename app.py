@@ -1,5 +1,6 @@
 import os
 import io
+import json
 import streamlit as st
 import pandas as pd
 import joblib
@@ -34,8 +35,13 @@ def authenticate_gmail():
     creds = None
     # 1. Try to load from Streamlit Secrets (Recommended for Cloud)
     if "GOOGLE_TOKEN" in st.secrets:
-        token_info = st.secrets["GOOGLE_TOKEN"]
-        creds = Credentials.from_authorized_user_info(token_info, SCOPES)
+        try:
+            # We must parse the string from secrets into a dictionary
+            token_info = json.loads(st.secrets["GOOGLE_TOKEN"])
+            creds = Credentials.from_authorized_user_info(token_info, SCOPES)
+        except Exception as e:
+            st.error(f"Error parsing GOOGLE_TOKEN from secrets: {e}")
+            return None
     
     # 2. Fallback to local token.json (For local dev)
     elif os.path.exists('token.json'):
@@ -46,27 +52,23 @@ def authenticate_gmail():
             creds.refresh(Request())
         else:
             # For Cloud deployment, we avoid flow.run_local_server() as it fails
-            # Instead, we guide the user to provide credentials via secrets
             if "GOOGLE_CREDENTIALS" in st.secrets:
-                creds_info = st.secrets["GOOGLE_CREDENTIALS"]
-                flow = InstalledAppFlow.from_client_config(creds_info, SCOPES)
+                try:
+                    creds_info = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
+                    flow = InstalledAppFlow.from_client_config(creds_info, SCOPES)
+                except Exception as e:
+                    st.error(f"Error parsing GOOGLE_CREDENTIALS from secrets: {e}")
+                    return None
             elif os.path.exists('credentials.json'):
                 flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
             else:
                 st.error("Missing Google API Credentials! Please set up 'GOOGLE_CREDENTIALS' in Streamlit Secrets.")
                 return None
             
-            # In a cloud environment, run_local_server doesn't work well.
-            # We'll use run_console for a manual code entry or suggest local auth first.
-            st.info("Authentication required. If you are on Streamlit Cloud, please authenticate locally first and paste the 'token.json' content into Secrets.")
-            try:
-                # This will still likely fail on Cloud if it's not interactive, 
-                # but it's better than trying to open a Windows Chrome browser.
-                creds = flow.run_local_server(port=0, open_browser=False)
-                # Note: On Streamlit Cloud, you should really use a fixed Refresh Token in Secrets.
-            except Exception as e:
-                st.error(f"Auth Error: {e}")
-                return None
+            # Note: run_local_server will still fail on Streamlit Cloud.
+            # This is why GOOGLE_TOKEN in secrets is required.
+            st.info("Authentication required. Please ensure both GOOGLE_TOKEN and GOOGLE_CREDENTIALS are set correctly in Streamlit Secrets.")
+            return None
             
     return build('gmail', 'v1', credentials=creds)
 
@@ -117,12 +119,12 @@ st.markdown("""
 
 # --- AUTHENTICATION FLOW ---
 service = None
-if "GOOGLE_TOKEN" not in st.secrets and not os.path.exists('token.json'):
+# Check secrets or local file
+has_token = "GOOGLE_TOKEN" in st.secrets or os.path.exists('token.json')
+
+if not has_token:
     st.warning("🔒 Gmail connection required.")
-    if st.button("Connect your Gmail Account"):
-        service = authenticate_gmail()
-        if service:
-            st.rerun()
+    st.info("To fix this in the cloud, paste your 'token.json' content into the GOOGLE_TOKEN secret in Advanced Settings.")
 else:
     try:
         service = authenticate_gmail()
@@ -136,7 +138,7 @@ else:
                 st.rerun()
     except Exception as e:
         st.sidebar.error(f"Session error: {e}")
-        if st.sidebar.button("Reconnect"):
+        if st.sidebar.button("Try Reconnecting"):
             if os.path.exists('token.json'):
                 os.remove('token.json')
             st.rerun()
