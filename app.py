@@ -30,34 +30,43 @@ def clean_text_pipeline(text):
 # --- GMAIL API LOGIC ---
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 
-def authenticate_gmail(auto_start=False):
+def authenticate_gmail():
     creds = None
-    if os.path.exists('token.json'):
+    # 1. Try to load from Streamlit Secrets (Recommended for Cloud)
+    if "GOOGLE_TOKEN" in st.secrets:
+        token_info = st.secrets["GOOGLE_TOKEN"]
+        creds = Credentials.from_authorized_user_info(token_info, SCOPES)
+    
+    # 2. Fallback to local token.json (For local dev)
+    elif os.path.exists('token.json'):
         creds = Credentials.from_authorized_user_file('token.json', SCOPES)
         
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
-        elif auto_start:
-            # Automatic login trigger
-            chrome_path = 'C:/Program Files/Google/Chrome/Application/chrome.exe'
-            if not os.path.exists(chrome_path):
-                chrome_path = 'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe'
-            
-            os.environ['BROWSER'] = chrome_path + ' %s'
-            
-            if os.path.exists('credentials.json'):
-                flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
-                st.info("🚀 Redirecting to Google Login... Please sign in to continue.")
-                creds = flow.run_local_server(port=0)
-                with open('token.json', 'w') as token:
-                    token.write(creds.to_json())
-                st.rerun()
-            else:
-                st.error("credentials.json not found! Please provide it to enable Gmail access.")
-                return None
         else:
-            return None
+            # For Cloud deployment, we avoid flow.run_local_server() as it fails
+            # Instead, we guide the user to provide credentials via secrets
+            if "GOOGLE_CREDENTIALS" in st.secrets:
+                creds_info = st.secrets["GOOGLE_CREDENTIALS"]
+                flow = InstalledAppFlow.from_client_config(creds_info, SCOPES)
+            elif os.path.exists('credentials.json'):
+                flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+            else:
+                st.error("Missing Google API Credentials! Please set up 'GOOGLE_CREDENTIALS' in Streamlit Secrets.")
+                return None
+            
+            # In a cloud environment, run_local_server doesn't work well.
+            # We'll use run_console for a manual code entry or suggest local auth first.
+            st.info("Authentication required. If you are on Streamlit Cloud, please authenticate locally first and paste the 'token.json' content into Secrets.")
+            try:
+                # This will still likely fail on Cloud if it's not interactive, 
+                # but it's better than trying to open a Windows Chrome browser.
+                creds = flow.run_local_server(port=0, open_browser=False)
+                # Note: On Streamlit Cloud, you should really use a fixed Refresh Token in Secrets.
+            except Exception as e:
+                st.error(f"Auth Error: {e}")
+                return None
             
     return build('gmail', 'v1', credentials=creds)
 
@@ -108,22 +117,28 @@ st.markdown("""
 
 # --- AUTHENTICATION FLOW ---
 service = None
-if not os.path.exists('token.json'):
-    st.warning("🔒 You are not logged in to Gmail.")
-    if st.button("Connect your Gmail Account Now"):
-        service = authenticate_gmail(auto_start=True)
+if "GOOGLE_TOKEN" not in st.secrets and not os.path.exists('token.json'):
+    st.warning("🔒 Gmail connection required.")
+    if st.button("Connect your Gmail Account"):
+        service = authenticate_gmail()
+        if service:
+            st.rerun()
 else:
     try:
         service = authenticate_gmail()
-        current_user = get_user_email(service)
-        st.sidebar.success(f"✅ **Connected:** {current_user}")
-        if st.sidebar.button("Logout / Switch Account"):
-            os.remove('token.json')
-            st.rerun()
-    except Exception:
-        st.sidebar.error("Session expired.")
+        if service:
+            current_user = get_user_email(service)
+            st.sidebar.success(f"✅ **Connected:** {current_user}")
+            if st.sidebar.button("Logout / Switch Account"):
+                if os.path.exists('token.json'):
+                    os.remove('token.json')
+                st.info("To fully logout from Cloud, clear GOOGLE_TOKEN from Secrets.")
+                st.rerun()
+    except Exception as e:
+        st.sidebar.error(f"Session error: {e}")
         if st.sidebar.button("Reconnect"):
-            os.remove('token.json')
+            if os.path.exists('token.json'):
+                os.remove('token.json')
             st.rerun()
 
 st.divider()
